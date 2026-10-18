@@ -46,7 +46,7 @@ def affected(write, query, principal, negative=True, coarse=False):
         return any(
             image is not None
             and image.get("principal") == principal
-            and image.get("tenant") == query.get("tenant")
+            and ("tenant" not in query or image.get("tenant") == query["tenant"])
             for image in images
         )
     return False
