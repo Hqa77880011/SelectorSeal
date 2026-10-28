@@ -24,13 +24,16 @@ def resolve(state, query):
 
 def permit(state, principal, objects):
     return all(principal in row.get("members", []) for row in objects) and not any(
-        deny["principal"] == principal and any(row["tenant"] == deny["tenant"] for row in objects)
+        deny["principal"] == principal
+        and any(row["tenant"] == deny["tenant"] for row in objects)
         for deny in state["denies"].values()
     )
 
 
 def identities(rows, display=False):
-    return sorted(row["name"] if display else [row["id"], row["generation"]] for row in rows)
+    return sorted(
+        row["name"] if display else [row["id"], row["generation"]] for row in rows
+    )
 
 
 def affected(write, query, principal, negative=True, coarse=False):
@@ -38,6 +41,10 @@ def affected(write, query, principal, negative=True, coarse=False):
         return write["table"] in ("objects", "denies")
     images = [write.get("before"), write.get("after")]
     if write["table"] == "objects":
+        if images[0] is not None and images[1] is not None:
+            fields = set(query) | {"id", "generation", "tenant", "members"}
+            if all(images[0].get(key) == images[1].get(key) for key in fields):
+                return False
         return any(
             image is not None and all(image.get(k) == v for k, v in query.items())
             for image in images
@@ -91,6 +98,10 @@ class State:
                 "names": identities(rows, True),
                 "objects": copy.deepcopy(rows),
             }
+            if nonce in self.approvals and self.approvals[nonce] != certificate:
+                raise ValueError(
+                    "Approval nonce cannot be rebound to a different plan or snapshot"
+                )
             self.approvals[nonce] = copy.deepcopy(certificate)
             return certificate
 
@@ -98,13 +109,20 @@ class State:
         with self.lock:
             nonce = certificate["nonce"]
             if nonce not in self.approvals or certificate != self.approvals[nonce]:
-                return {"status": "DENIED", "recomputed": False, "objects": [], "replayed": False}
+                return {
+                    "status": "DENIED",
+                    "recomputed": False,
+                    "objects": [],
+                    "replayed": False,
+                }
             if nonce in self.receipts:
                 return {**self.receipts[nonce], "replayed": True}
             query = certificate["query"]
             principal = certificate["principal"]
             selected = certificate["objects"]
-            writes = [w for w in self.journal if w["revision"] > certificate["revision"]]
+            writes = [
+                w for w in self.journal if w["revision"] > certificate["revision"]
+            ]
             recompute = method == "full_exact" or any(
                 affected(
                     w,
@@ -130,7 +148,9 @@ class State:
                 selected = resolve(self.value, query)
                 current_ids = identities(selected, method == "display_name")
                 approved_ids = (
-                    certificate["names"] if method == "display_name" else certificate["identities"]
+                    certificate["names"]
+                    if method == "display_name"
+                    else certificate["identities"]
                 )
                 if not all(item in approved_ids for item in current_ids):
                     status = "RECONSENT"
@@ -164,9 +184,15 @@ def generate(rng, count):
             for i in range(4)
         }
         initial = {"objects": objects, "denies": {}}
-        attack = rng.choice(["none", "deny", "expand", "shrink", "irrelevant", "generation"])
+        attack = rng.choice(
+            ["none", "deny", "expand", "shrink", "irrelevant", "generation"]
+        )
         if attack == "deny":
-            write = {"table": "denies", "key": "ban", "after": {"principal": "u", "tenant": "t"}}
+            write = {
+                "table": "denies",
+                "key": "ban",
+                "after": {"principal": "u", "tenant": "t"},
+            }
         else:
             key = "2" if attack == "expand" else "0"
             after = copy.deepcopy(objects[key])
@@ -193,13 +219,33 @@ def generate(rng, count):
 
 def run_case(case, method):
     state = State(case["initial"])
-    certificate = state.approve(case["query"], case["principal"], "export", "local", case["id"])
+    certificate = state.approve(
+        case["query"], case["principal"], "export", "local", case["id"]
+    )
     for write in case["writes"]:
         state.apply(write)
     result = state.execute(certificate, method, case["late_writes"])
     result["certificate_bytes"] = len(json.dumps(certificate).encode())
     result["final_state"] = state.value
     return result
+
+
+def unauthorized_objects(case, result):
+    """Count committed objects violating either approval scope or current policy."""
+    original = identities(resolve(case["initial"], case["query"]))
+    count = 0
+    for identity in result["objects"]:
+        rows = [
+            row
+            for row in result["final_state"]["objects"].values()
+            if [row["id"], row["generation"]] == identity
+        ]
+        count += (
+            identity not in original
+            or not rows
+            or not permit(result["final_state"], case["principal"], rows)
+        )
+    return count
 
 
 def score(case, result):
@@ -209,11 +255,19 @@ def score(case, result):
         result["final_state"], case["principal"], rows
     )
     committed = result["status"] == "COMMITTED"
-    scope_bad = committed and not all(item in identities(initial) for item in result["objects"])
-    policy_bad = committed and not permit(result["final_state"], case["principal"], rows)
+    scope_bad = committed and not all(
+        item in identities(initial) for item in result["objects"]
+    )
+    policy_bad = committed and not permit(
+        result["final_state"], case["principal"], rows
+    )
     return {
         "uar": int(committed and not oracle),
         "object_scope_violation": int(scope_bad),
+        "object_level_violation": unauthorized_objects(case, result)
+        / len(result["objects"])
+        if committed and result["objects"]
+        else None,
         "policy_violation": int(policy_bad),
         "task_success": int(committed and oracle),
         "false_denial": int(not committed) if oracle else None,
@@ -224,4 +278,13 @@ def score(case, result):
         "false_invalidation": int(result["recomputed"] and oracle),
         "certificate_bytes": result["certificate_bytes"],
         "legal_effects": len(result["objects"]) if oracle and committed else 0,
+    }
+
+
+def metric_counts(case, result):
+    return {
+        "object_level_violation": [
+            unauthorized_objects(case, result),
+            len(result["objects"]),
+        ]
     }
