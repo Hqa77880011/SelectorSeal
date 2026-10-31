@@ -14,11 +14,18 @@ METHODS = [
 ]
 
 
+def same(left, right):
+    """Compare finite JSON values without conflating Boolean and integer fields."""
+    return json.dumps(left, sort_keys=True, allow_nan=False) == json.dumps(
+        right, sort_keys=True, allow_nan=False
+    )
+
+
 def resolve(state, query):
     return [
         row
         for row in state["objects"].values()
-        if all(row.get(key) == value for key, value in query.items())
+        if all(key in row and same(row[key], value) for key, value in query.items())
     ]
 
 
@@ -43,10 +50,11 @@ def affected(write, query, principal, negative=True, coarse=False):
     if write["table"] == "objects":
         if images[0] is not None and images[1] is not None:
             fields = set(query) | {"id", "generation", "tenant", "members"}
-            if all(images[0].get(key) == images[1].get(key) for key in fields):
+            if all(same(images[0].get(key), images[1].get(key)) for key in fields):
                 return False
         return any(
-            image is not None and all(image.get(k) == v for k, v in query.items())
+            image is not None and all(k in image and same(image[k], v)
+                                      for k, v in query.items())
             for image in images
         )
     if write["table"] == "denies" and negative:
@@ -67,12 +75,26 @@ class State:
         self.receipts = {}
         self.approvals = {}
         self.lock = threading.RLock()
+        self.generations = {}
+        for key, row in self.value["objects"].items():
+            self._validate_object(key, row)
+            self.generations[key] = row["generation"]
+
+    def _validate_object(self, key, row):
+        if not same(row["id"], key) or type(row["generation"]) is not int or row["generation"] < 1:
+            raise ValueError("Objects require a matching stable ID and positive integer generation")
 
     def apply(self, write):
         with self.lock:
             table = self.value[write["table"]]
             before = copy.deepcopy(table.get(write["key"]))
             after = copy.deepcopy(write.get("after"))
+            if write["table"] == "objects" and after is not None:
+                self._validate_object(write["key"], after)
+                prior = self.generations.get(write["key"], 0)
+                if after["generation"] < prior or before is None and after["generation"] <= prior:
+                    raise ValueError("Object recreation requires a fresh increasing generation")
+                self.generations[write["key"]] = after["generation"]
             if after is None:
                 table.pop(write["key"], None)
             else:
@@ -98,7 +120,7 @@ class State:
                 "names": identities(rows, True),
                 "objects": copy.deepcopy(rows),
             }
-            if nonce in self.approvals and self.approvals[nonce] != certificate:
+            if nonce in self.approvals and not same(self.approvals[nonce], certificate):
                 raise ValueError(
                     "Approval nonce cannot be rebound to a different plan or snapshot"
                 )
@@ -108,7 +130,7 @@ class State:
     def execute(self, certificate, method, late_writes=()):
         with self.lock:
             nonce = certificate["nonce"]
-            if nonce not in self.approvals or certificate != self.approvals[nonce]:
+            if nonce not in self.approvals or not same(certificate, self.approvals[nonce]):
                 return {
                     "status": "DENIED",
                     "recomputed": False,
@@ -116,7 +138,7 @@ class State:
                     "replayed": False,
                 }
             if nonce in self.receipts:
-                return {**self.receipts[nonce], "replayed": True}
+                return {**copy.deepcopy(self.receipts[nonce]), "replayed": True}
             query = certificate["query"]
             principal = certificate["principal"]
             selected = certificate["objects"]
@@ -165,7 +187,7 @@ class State:
                 "replayed": False,
             }
             if status == "COMMITTED":
-                self.receipts[nonce] = result
+                self.receipts[nonce] = copy.deepcopy(result)
             return result
 
 

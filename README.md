@@ -83,6 +83,12 @@ Validated locally: editable installation, syntax/import and regression checks, s
 
 Regression checks cover hand-computable rates and eligible denominators, the algorithm's safety boundary, and applicable replay/serialization paths. The documented small-data preparation, execution, suite, evaluation, statistics and plotting commands are the validation entry points. No complete training or large experimental campaign is required for these checks.
 
+Object keys must match stable IDs and generations are positive integers. The
+local journal retains generation tombstones: recreating a deleted ID requires a
+strictly newer generation. Canonical JSON binding rejects Boolean/integer changes
+inside a stored approval. Equality selectors distinguish absent attributes from
+explicit null and preserve JSON types in invalidation as well as resolution.
+
 The selector grammar is finite equality conjunctions, with simple member/tenant-deny policies. The RLock backend is atomic within one Python State instance; it is not a PostgreSQL serializable adapter or cross-process durable nonce journal. Receipt replay is an executable local state model, not a committed external export. General ranges/traversals/NOT EXISTS, signed approval envelopes, index watermarks and write-side server performance require adapters and are not claimed as validated.
 
 The source retains its existing MIT license. Data and external systems remain subject to their own licenses and access rules.

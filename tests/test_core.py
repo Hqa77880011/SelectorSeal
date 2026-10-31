@@ -6,6 +6,43 @@ from selectorseal import core
 
 
 class SelectorSealTests(unittest.TestCase):
+    def test_bound_certificate_rejects_boolean_for_integer_generation(self):
+        case = self.case()
+        state = core.State(case["initial"])
+        cert = state.approve(case["query"], "u", "export", "local", "n")
+        cert["identities"][0][1] = True
+        cert["objects"][0]["generation"] = True
+        self.assertEqual(state.execute(cert, "selectorseal")["status"], "DENIED")
+
+    def test_deleted_object_requires_fresh_generation(self):
+        case = self.case()
+        state = core.State(case["initial"])
+        cert = state.approve(case["query"], "u", "export", "local", "n")
+        row = copy.deepcopy(case["initial"]["objects"]["0"])
+        state.apply(dict(table="objects", key="0", after=None))
+        with self.assertRaisesRegex(ValueError, "generation"):
+            state.apply(dict(table="objects", key="0", after=row))
+        row["generation"] = 2
+        state.apply(dict(table="objects", key="0", after=row))
+        self.assertEqual(state.execute(cert, "selectorseal")["status"], "RECONSENT")
+
+    def test_selector_distinguishes_missing_null_and_boolean_integer(self):
+        state = {"objects": {"a": {"flag": True}, "b": {"flag": None}, "c": {}}}
+        self.assertEqual(core.resolve(state, {"flag": 1}), [])
+        self.assertEqual(core.resolve(state, {"flag": None}), [{"flag": None}])
+
+    def test_receipt_replay_is_immutable_to_caller_changes(self):
+        case = self.case()
+        state = core.State(case["initial"])
+        cert = state.approve(case["query"], "u", "export", "local", "n")
+        first = state.execute(cert, "selectorseal")
+        expected = copy.deepcopy(first["objects"])
+        first["objects"].clear()
+        replay = state.execute(cert, "selectorseal")
+        self.assertEqual(replay["objects"], expected)
+        replay["objects"].clear()
+        self.assertEqual(state.execute(cert, "selectorseal")["objects"], expected)
+
     def case(self):
         case = next(core.generate(random.Random(17), 1))
         case.update(writes=[], late_writes=[])
